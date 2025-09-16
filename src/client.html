@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Voting App — Demo Client</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 20px; }
+    h1 { margin-bottom: 8px; }
+    .controls { margin-bottom: 16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    input[type="number"], input[type="text"] { padding:6px 8px; width:120px; }
+    button { padding:8px 12px; cursor:pointer; }
+    #chartWrap { width: 700px; max-width:100%; margin-top:16px; }
+    #log { margin-top:12px; white-space:pre-wrap; background:#f7f7f7; padding:8px; border-radius:6px; }
+    .option-btn { margin:6px 6px 0 0; }
+  </style>
+  <!-- Socket.IO client -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <h1>📊 Voting App — Demo Client</h1>
+
+  <div class="controls">
+    <label>Poll ID: <input id="pollId" type="number" value="1" /></label>
+    <label>Your User ID: <input id="userId" type="number" value="1" /></label>
+    <button id="loadPoll">Load & Join Poll</button>
+    <button id="refresh">Refresh Poll</button>
+  </div>
+
+  <div id="pollMeta">
+    <strong id="question">No poll loaded</strong>
+    <div id="options" style="margin-top:8px;"></div>
+  </div>
+
+  <div id="chartWrap">
+    <canvas id="pollChart"></canvas>
+  </div>
+
+  <div id="log"></div>
+
+<script>
+const API_BASE = "http://localhost:5000"; 
+let socket = null;
+let pollId = null;
+let chart = null;
+let currentResults = { id: null, question: '', options: [] };
+
+const logEl = document.getElementById('log');
+function log(...args){ logEl.textContent += args.join(' ') + "\\n"; logEl.scrollTop = logEl.scrollHeight; }
+
+document.getElementById('loadPoll').addEventListener('click', async () => {
+  pollId = Number(document.getElementById('pollId').value || 0);
+  if (!pollId) return alert('Enter poll ID');
+  await loadPollAndJoin(pollId);
+});
+
+document.getElementById('refresh').addEventListener('click', async () => {
+  if (!pollId) return alert('Load a poll first');
+  await fetchPoll(pollId);
+});
+
+async function loadPollAndJoin(id){
+  await fetchPoll(id);
+  // connect socket (single connection)
+  if (!socket) {
+    socket = io(API_BASE);
+    socket.on('connect', () => log('Socket connected', socket.id));
+    socket.on('disconnect', () => log('Socket disconnected'));
+    socket.on('voteUpdate', (data) => {
+      log('Received voteUpdate:', JSON.stringify(data));
+      updateChartWithData(data);
+      renderOptions(data.options);
+    });
+  }
+  socket.emit('joinPoll', id);
+  log('Joined poll room: poll_' + id);
+}
+
+async function fetchPoll(id){
+  try {
+    const res = await fetch(`${API_BASE}/api/polls/${id}`);
+    if (!res.ok) {
+      const text = await res.text();
+      log('Failed to fetch poll:', res.status, text);
+      return;
+    }
+    const data = await res.json();
+    log('Fetched poll:', JSON.stringify(data));
+    currentResults = data;
+    renderPoll(data);
+    renderChart(data);
+  } catch (err) {
+    log('Fetch error:', err.message);
+  }
+}
+
+function renderPoll(poll){
+  document.getElementById('question').textContent = poll.question;
+  renderOptions(poll.options);
+}
+
+function renderOptions(options){
+  const container = document.getElementById('options');
+  container.innerHTML = '';
+  const userIdInput = document.getElementById('userId');
+  options.forEach(opt => {
+    const btn = document.createElement('button');
+    btn.className = 'option-btn';
+    btn.textContent = `${opt.text} (${opt.votes})`;
+    btn.onclick = () => castVote(Number(userIdInput.value || 0), opt.id);
+    container.appendChild(btn);
+  });
+}
+
+async function castVote(userId, pollOptionId){
+  if (!userId) return alert('Enter your userId');
+  try {
+    const res = await fetch(`${API_BASE}/api/votes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, pollOptionId })
+    });
+    const body = await res.json().catch(()=>null);
+    if (!res.ok) {
+      log('Vote failed:', res.status, JSON.stringify(body));
+      alert('Vote failed: ' + (body?.error || res.status));
+      return;
+    }
+    log('Vote success:', JSON.stringify(body));
+    // chart will update via socket (voteUpdate) — but we also update UI immediately if response contains pollResults
+    if (body?.pollResults) {
+      updateChartWithData(body.pollResults);
+      renderOptions(body.pollResults.options);
+    } else {
+      // optional: refresh poll
+      await fetchPoll(pollId);
+    }
+  } catch (err) {
+    log('Vote error:', err.message);
+  }
+}
+
+function renderChart(poll){
+  const ctx = document.getElementById('pollChart').getContext('2d');
+  const labels = poll.options.map(o => o.text);
+  const votes = poll.options.map(o => o.votes);
+  if (chart) {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = votes;
+    chart.update();
+    return;
+  }
+  chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Votes',
+        data: votes,
+        backgroundColor: 'rgba(54, 162, 235, 0.6)',
+        borderColor: 'rgba(54, 162, 235, 1)',
+        borderWidth: 1
+      }]
+    },
+    options: {
+      animation: { duration: 300 },
+      scales: {
+        y: { beginAtZero: true, precision: 0 }
+      }
+    }
+  });
+}
+
+function updateChartWithData(pollData){
+  if (!chart) {
+    renderChart(pollData);
+    return;
+  }
+  chart.data.labels = pollData.options.map(o => o.text);
+  chart.data.datasets[0].data = pollData.options.map(o => o.votes);
+  chart.update();
+}
+</script>
+</body>
+</html>
